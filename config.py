@@ -14,8 +14,8 @@ FISH_AUDIO_BASE_URL = os.getenv("FISH_AUDIO_BASE_URL", "https://api.fish.audio")
 FISH_AUDIO_BACKEND = os.getenv("FISH_AUDIO_BACKEND", "s1")
 FISH_AUDIO_MP3_BITRATE = int(os.getenv("FISH_AUDIO_MP3_BITRATE", "128"))
 
-ADMIN_CONTACT = os.getenv("ADMIN_CONTACT", "t.me/sellmodel")
-WEBSITE_URL   = os.getenv("WEBSITE_URL", "modelboxbd.com")
+ADMIN_CONTACT = os.getenv("ADMIN_CONTACT", "x")
+WEBSITE_URL   = os.getenv("WEBSITE_URL", "x")
 
 # REMOVE OLD ADMIN_IDS OVERRIDE ❌
 # ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]

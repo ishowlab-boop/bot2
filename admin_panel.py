@@ -38,10 +38,12 @@ def _get_models_from_db(db):
                 out = []
                 for m in models:
                     if isinstance(m, dict) and m.get("id"):
-                        out.append({
-                            "id": str(m["id"]).strip(),
-                            "name": str(m.get("name") or m["id"]).strip(),
-                        })
+                        out.append(
+                            {
+                                "id": str(m["id"]).strip(),
+                                "name": str(m.get("name") or m["id"]).strip(),
+                            }
+                        )
                 if out:
                     return out
         except Exception:
@@ -64,7 +66,7 @@ def _get_default_voice_id(db, models=None):
     return fallback
 
 
-def _short_id(voice_id: str, size: int = 10) -> str:
+def _short_id(voice_id: str, size: int = 16) -> str:
     voice_id = (voice_id or "").strip()
     if len(voice_id) <= size:
         return voice_id
@@ -78,10 +80,26 @@ def _voice_summary_text(db, models):
         name = m.get("name") or "Voice"
         vid = (m.get("id") or "").strip()
         marker = " ✅ DEFAULT" if vid == default_id else ""
-        lines.append(f"{idx}. {name} - <code>{_short_id(vid, 16)}</code>{marker}")
+        lines.append(f"{idx}. {name} - <code>{_short_id(vid)}</code>{marker}")
     lines.append("")
-    lines.append("Select a voice button below to exchange ID or rename it.")
+    lines.append("Tap a voice button below to manage it.")
     return "\n".join(lines)
+
+
+def _voice_detail_text(db, models, idx: int) -> str:
+    if idx < 0 or idx >= len(models):
+        return "❌ Invalid voice"
+    voice = models[idx]
+    vid = (voice.get("id") or "").strip()
+    name = (voice.get("name") or "Voice").strip()
+    default_id = _get_default_voice_id(db, models)
+    badge = "\n⭐ <b>This is the default voice</b>" if vid == default_id else ""
+    return (
+        f"🎙 <b>Voice Details</b>\n\n"
+        f"Name: <b>{name}</b>\n"
+        f"ID: <code>{vid}</code>{badge}\n\n"
+        f"Choose an action below."
+    )
 
 
 # -----------------------
@@ -117,14 +135,30 @@ def build_validity_action_keyboard(user_id: int):
     return kb
 
 
-def build_voices_keyboard(models):
+def build_voices_keyboard(models, db):
     kb = types.InlineKeyboardMarkup()
+    default_id = _get_default_voice_id(db, models)
     for idx, m in enumerate(models):
         name = m.get("name") or "Voice"
-        kb.add(types.InlineKeyboardButton(f"🎙 {name}", callback_data=f"admin:voices:edit:{idx}"))
+        vid = (m.get("id") or "").strip()
+        icon = "⭐" if vid == default_id else "🎙"
+        kb.add(types.InlineKeyboardButton(f"{icon} {name}", callback_data=f"admin:voices:view:{idx}"))
     kb.add(types.InlineKeyboardButton("➕ Add Voice", callback_data="admin:voices:add"))
     kb.add(types.InlineKeyboardButton("♻️ Reset Voices", callback_data="admin:voices:reset"))
     kb.add(types.InlineKeyboardButton("⬅ Back", callback_data="admin:menu"))
+    return kb
+
+
+def build_voice_actions_keyboard(idx: int, is_default: bool = False):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔁 Change Voice ID", callback_data=f"admin:voices:changeid:{idx}"))
+    kb.add(types.InlineKeyboardButton("📝 Change Voice Name", callback_data=f"admin:voices:changename:{idx}"))
+    if is_default:
+        kb.add(types.InlineKeyboardButton("⭐ Already Default", callback_data="admin:noop"))
+    else:
+        kb.add(types.InlineKeyboardButton("⭐ Set As Default", callback_data=f"admin:voices:setdefault:{idx}"))
+    kb.add(types.InlineKeyboardButton("❌ Delete Voice", callback_data=f"admin:voices:delete:{idx}"))
+    kb.add(types.InlineKeyboardButton("⬅ Back to Voices", callback_data="admin:voices"))
     return kb
 
 
@@ -149,10 +183,13 @@ def register_admin_handlers(bot: telebot.TeleBot, db):
         if not ensure_admin(uid):
             return bot.answer_callback_query(callback.id)
 
-        bot.answer_callback_query(callback.id)
-
         parts = callback.data.split(":")
         section = parts[1]
+
+        if callback.data == "admin:noop":
+            return bot.answer_callback_query(callback.id, "This voice is already default")
+
+        bot.answer_callback_query(callback.id)
 
         if section == "menu":
             return bot.send_message(callback.message.chat.id, "⚙️ Admin Panel", reply_markup=build_admin_menu())
@@ -210,7 +247,12 @@ def register_admin_handlers(bot: telebot.TeleBot, db):
         if section == "default_voice":
             models = _get_models_from_db(db)
             default_id = _get_default_voice_id(db, models)
-            text = ["🎙 <b>Set Default Voice ID</b>", f"Current default: <code>{default_id}</code>", "", "Send a voice ID from your current voice list."]
+            text = [
+                "🎙 <b>Set Default Voice ID</b>",
+                f"Current default: <code>{default_id}</code>",
+                "",
+                "Send a voice ID from your current voice list.",
+            ]
             admin_steps[uid] = {"action": "set_default_voice"}
             return bot.send_message(callback.message.chat.id, "\n".join(text))
 
@@ -219,37 +261,80 @@ def register_admin_handlers(bot: telebot.TeleBot, db):
             return bot.send_message(
                 callback.message.chat.id,
                 _voice_summary_text(db, models),
-                reply_markup=build_voices_keyboard(models),
+                reply_markup=build_voices_keyboard(models, db),
             )
 
-        if section == "voices" and len(parts) >= 4 and parts[2] == "edit":
+        if section == "voices" and len(parts) >= 4 and parts[2] == "view":
             idx = int(parts[3])
             models = _get_models_from_db(db)
             if idx < 0 or idx >= len(models):
                 return bot.send_message(callback.message.chat.id, "❌ Invalid voice")
-
-            v = models[idx]
-            admin_steps[uid] = {"action": "voice_edit_apply", "index": idx}
+            voice_id = (models[idx].get("id") or "").strip()
+            is_default = voice_id == _get_default_voice_id(db, models)
             return bot.send_message(
                 callback.message.chat.id,
-                "\n".join([
-                    f"🎙 Voice Name: {v.get('name')}",
-                    f"Current ID: <code>{v.get('id')}</code>",
-                    "",
-                    "Send only new ID:",
-                    "<code>new_voice_id</code>",
-                    "",
-                    "Or send both ID and name:",
-                    "<code>new_voice_id | new_voice_name</code>",
-                ])
+                _voice_detail_text(db, models, idx),
+                reply_markup=build_voice_actions_keyboard(idx, is_default=is_default),
+            )
+
+        if section == "voices" and len(parts) >= 4 and parts[2] == "changeid":
+            idx = int(parts[3])
+            models = _get_models_from_db(db)
+            if idx < 0 or idx >= len(models):
+                return bot.send_message(callback.message.chat.id, "❌ Invalid voice")
+            admin_steps[uid] = {"action": "voice_change_id", "index": idx}
+            return bot.send_message(
+                callback.message.chat.id,
+                f"Send new voice ID for <b>{models[idx].get('name') or 'Voice'}</b>:"
+            )
+
+        if section == "voices" and len(parts) >= 4 and parts[2] == "changename":
+            idx = int(parts[3])
+            models = _get_models_from_db(db)
+            if idx < 0 or idx >= len(models):
+                return bot.send_message(callback.message.chat.id, "❌ Invalid voice")
+            admin_steps[uid] = {"action": "voice_change_name", "index": idx}
+            return bot.send_message(
+                callback.message.chat.id,
+                f"Send new voice name for ID <code>{models[idx].get('id')}</code>:"
+            )
+
+        if section == "voices" and len(parts) >= 4 and parts[2] == "setdefault":
+            idx = int(parts[3])
+            models = _get_models_from_db(db)
+            if idx < 0 or idx >= len(models):
+                return bot.send_message(callback.message.chat.id, "❌ Invalid voice")
+            voice_id = (models[idx].get("id") or "").strip()
+            db.set_setting("default_voice_id", voice_id)
+            return bot.send_message(
+                callback.message.chat.id,
+                f"✅ Default voice set to:\n<b>{models[idx].get('name') or 'Voice'}</b>\n<code>{voice_id}</code>"
+            )
+
+        if section == "voices" and len(parts) >= 4 and parts[2] == "delete":
+            idx = int(parts[3])
+            models = _get_models_from_db(db)
+            if idx < 0 or idx >= len(models):
+                return bot.send_message(callback.message.chat.id, "❌ Invalid voice")
+            if len(models) <= 1:
+                return bot.send_message(callback.message.chat.id, "❌ At least one voice must remain in the list")
+
+            removed = models.pop(idx)
+            removed_id = (removed.get("id") or "").strip()
+            _set_models_to_db(db, models)
+
+            current_default = (db.get_setting("default_voice_id", "") or "").strip()
+            if current_default == removed_id:
+                db.set_setting("default_voice_id", (models[0].get("id") or DEFAULT_MODELS[0]["id"]).strip())
+
+            return bot.send_message(
+                callback.message.chat.id,
+                f"✅ Voice deleted:\n<b>{removed.get('name') or 'Voice'}</b>\n<code>{removed_id}</code>"
             )
 
         if section == "voices" and len(parts) >= 3 and parts[2] == "add":
-            admin_steps[uid] = {"action": "voice_add"}
-            return bot.send_message(
-                callback.message.chat.id,
-                "Send new voice like this:\n<code>voice_id | voice_name</code>"
-            )
+            admin_steps[uid] = {"action": "voice_add_id"}
+            return bot.send_message(callback.message.chat.id, "Send new voice ID:")
 
         if section == "voices" and len(parts) >= 3 and parts[2] == "reset":
             _set_models_to_db(db, DEFAULT_MODELS)
@@ -325,16 +410,8 @@ def register_admin_handlers(bot: telebot.TeleBot, db):
                 db.set_setting("default_voice_id", voice_id)
                 return bot.send_message(msg.chat.id, f"✅ Default voice updated:\n<code>{voice_id}</code>")
 
-            if action == "voice_edit_apply":
-                raw = (msg.text or "").strip()
-                if not raw:
-                    return bot.send_message(msg.chat.id, "❌ Please send a voice ID")
-
-                if "|" in raw:
-                    new_id, new_name = [x.strip() for x in raw.split("|", 1)]
-                else:
-                    new_id, new_name = raw, None
-
+            if action == "voice_change_id":
+                new_id = (msg.text or "").strip()
                 if len(new_id) < 10:
                     return bot.send_message(msg.chat.id, "❌ Invalid Voice ID")
 
@@ -343,15 +420,13 @@ def register_admin_handlers(bot: telebot.TeleBot, db):
                 if idx < 0 or idx >= len(models):
                     return bot.send_message(msg.chat.id, "❌ Invalid voice index")
 
-                old_id = (models[idx].get("id") or "").strip()
                 for i, item in enumerate(models):
                     item_id = (item.get("id") or "").strip()
                     if i != idx and item_id == new_id:
                         return bot.send_message(msg.chat.id, "❌ This voice ID already exists in the list")
 
+                old_id = (models[idx].get("id") or "").strip()
                 models[idx]["id"] = new_id
-                if new_name:
-                    models[idx]["name"] = new_name
                 _set_models_to_db(db, models)
 
                 current_default = (db.get_setting("default_voice_id", "") or "").strip()
@@ -360,30 +435,59 @@ def register_admin_handlers(bot: telebot.TeleBot, db):
 
                 return bot.send_message(
                     msg.chat.id,
-                    f"✅ Voice updated:\nName: {models[idx].get('name')}\nID: <code>{new_id}</code>"
+                    f"✅ Voice ID changed successfully!\nName: <b>{models[idx].get('name') or 'Voice'}</b>\nNew ID: <code>{new_id}</code>"
                 )
 
-            if action == "voice_add":
-                raw = (msg.text or "").strip()
-                if "|" not in raw:
-                    return bot.send_message(msg.chat.id, "❌ Use: <voice_id> | <voice_name>")
-                vid, vname = [x.strip() for x in raw.split("|", 1)]
-                if len(vid) < 10:
-                    return bot.send_message(msg.chat.id, "❌ Invalid voice id")
+            if action == "voice_change_name":
+                new_name = (msg.text or "").strip()
+                if not new_name:
+                    return bot.send_message(msg.chat.id, "❌ Voice name cannot be empty")
+
+                idx = int(step.get("index"))
+                models = _get_models_from_db(db)
+                if idx < 0 or idx >= len(models):
+                    return bot.send_message(msg.chat.id, "❌ Invalid voice index")
+
+                models[idx]["name"] = new_name
+                _set_models_to_db(db, models)
+                return bot.send_message(
+                    msg.chat.id,
+                    f"✅ Voice name changed successfully!\nID: <code>{models[idx].get('id')}</code>\nNew Name: <b>{new_name}</b>"
+                )
+
+            if action == "voice_add_id":
+                voice_id = (msg.text or "").strip()
+                if len(voice_id) < 10:
+                    return bot.send_message(msg.chat.id, "❌ Invalid Voice ID")
 
                 models = _get_models_from_db(db)
-                if vid in {(m.get('id') or '').strip() for m in models}:
+                if voice_id in {(m.get('id') or '').strip() for m in models}:
                     return bot.send_message(msg.chat.id, "❌ This voice ID already exists")
 
-                models.append({"id": vid, "name": vname or vid})
+                admin_steps[uid] = {"action": "voice_add_name", "voice_id": voice_id}
+                return bot.send_message(msg.chat.id, "Now send voice name:")
+
+            if action == "voice_add_name":
+                voice_name = (msg.text or "").strip()
+                voice_id = (step.get("voice_id") or "").strip()
+                if not voice_id:
+                    return bot.send_message(msg.chat.id, "❌ Voice ID missing. Please start again.")
+                if not voice_name:
+                    voice_name = voice_id
+
+                models = _get_models_from_db(db)
+                if voice_id in {(m.get('id') or '').strip() for m in models}:
+                    return bot.send_message(msg.chat.id, "❌ This voice ID already exists")
+
+                models.append({"id": voice_id, "name": voice_name})
                 _set_models_to_db(db, models)
 
                 if not (db.get_setting("default_voice_id", "") or "").strip():
-                    db.set_setting("default_voice_id", vid)
+                    db.set_setting("default_voice_id", voice_id)
 
                 return bot.send_message(
                     msg.chat.id,
-                    f"✅ Voice added successfully!\nName: {vname or vid}\nID: <code>{vid}</code>"
+                    f"✅ Voice added successfully!\nName: <b>{voice_name}</b>\nID: <code>{voice_id}</code>"
                 )
 
             if action == "broadcast":

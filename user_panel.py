@@ -1,8 +1,11 @@
+import json
 import os
 import re
 from datetime import datetime
+
 import telebot
 from telebot import types
+
 from config import (
     ADMIN_CONTACT,
     WEBSITE_URL,
@@ -15,6 +18,80 @@ from config import (
 from fish_audio import FishAudioClient
 
 
+# -----------------------
+# MODEL HELPERS
+# -----------------------
+def _get_models_from_db(db):
+    raw = db.get_setting("models_json", "")
+    if raw:
+        try:
+            models = json.loads(raw)
+            if isinstance(models, list) and models:
+                out = []
+                for m in models:
+                    if isinstance(m, dict) and m.get("id"):
+                        out.append({
+                            "id": str(m["id"]).strip(),
+                            "name": str(m.get("name") or m["id"]).strip(),
+                        })
+                if out:
+                    return out
+        except Exception:
+            pass
+    return DEFAULT_MODELS
+
+
+def _set_models_to_db(db, models):
+    db.set_setting("models_json", json.dumps(models, ensure_ascii=False))
+
+
+def get_active_models(db):
+    models = _get_models_from_db(db)
+    if not db.get_setting("models_json", ""):
+        _set_models_to_db(db, models)
+    return models
+
+
+def get_model_name(models, voice_id: str) -> str:
+    for m in models:
+        if (m.get("id") or "") == (voice_id or ""):
+            return m.get("name") or voice_id
+    return voice_id or "Unknown"
+
+
+def resolve_default_voice(db, models):
+    if not models:
+        models = DEFAULT_MODELS
+
+    default_voice_id = (db.get_setting("default_voice_id", "") or "").strip()
+    valid_ids = {(m.get("id") or "").strip() for m in models}
+
+    if default_voice_id in valid_ids:
+        return default_voice_id
+
+    fallback = (models[0].get("id") or DEFAULT_MODELS[0]["id"]).strip()
+    db.set_setting("default_voice_id", fallback)
+    return fallback
+
+
+def resolve_user_voice(db, user, models):
+    selected_model = ((user or {}).get("selected_model") or "").strip()
+    valid_ids = {(m.get("id") or "").strip() for m in models}
+
+    if selected_model and selected_model in valid_ids:
+        return selected_model
+
+    default_voice_id = resolve_default_voice(db, models)
+
+    if selected_model and selected_model != default_voice_id:
+        db.update_user_fields(user["id"], {"selected_model": default_voice_id})
+
+    return default_voice_id
+
+
+# -----------------------
+# UI HELPERS
+# -----------------------
 def build_user_keyboard() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     kb.row(types.KeyboardButton("Select Model"), types.KeyboardButton("Plans"))
@@ -37,17 +114,10 @@ def build_models_keyboard(models):
     return kb
 
 
-def get_model_name(models, voice_id: str) -> str:
-    for m in models:
-        if (m.get("id") or "") == (voice_id or ""):
-            return m.get("name") or voice_id
-    return voice_id or "Unknown"
-
-
 def humanize_text(s: str) -> str:
     s = (s or "").strip()
     s = re.sub(r"\s+", " ", s)
-    s = s.replace(", ", ", ... ")
+    s = s.replace(", ", ", … ")
     s = s.replace("!", "!\n").replace("?", "?\n").replace(".", ".\n")
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
@@ -86,6 +156,9 @@ def speed_to_label(mode: str) -> str:
     }.get(mode, "Natural")
 
 
+# -----------------------
+# MAIN REGISTER
+# -----------------------
 def register_user_handlers(bot: telebot.TeleBot, db):
     client = FishAudioClient()
 
@@ -93,15 +166,13 @@ def register_user_handlers(bot: telebot.TeleBot, db):
     def cmd_start(message: types.Message):
         db.ensure_user(message.from_user.id, message.from_user.username)
 
-        user_id = message.from_user.id
-
         welcome_text = (
             "✨ <b>Welcome to our bot!</b> 🤖\n"
             "We're glad to have you here 💙\n\n"
             "📢 <b>Share this bot with your friends:</b>\n"
             "🔗 <a href=\"https://t.me/ishowlab_bot\">t.me/ishowlab_bot</a>\n\n"
-            "🙏 <b>Thank you for joining us!</b>\n"
-            f"🆔 <b>Your ID:</b> <code>{user_id}</code>"
+            "🙏 Thank you for joining us!\n"
+            f"🆔 <b>Your ID:</b> <code>{message.from_user.id}</code>"
         )
 
         bot.send_message(
@@ -125,7 +196,9 @@ def register_user_handlers(bot: telebot.TeleBot, db):
 
         lines = ["Available plans:"]
         for p in PLANS:
-            lines.append(f"• {p['name']}: {p['credits']} credits, {p['price']}, validity {p['validity_days']} days")
+            lines.append(
+                f"• {p['name']}: {p['credits']} credits, {p['price']}, validity {p['validity_days']} days"
+            )
         bot.send_message(message.chat.id, "\n".join(lines))
 
     @bot.message_handler(func=lambda m: m.text == "Voice Speed")
@@ -141,15 +214,19 @@ def register_user_handlers(bot: telebot.TeleBot, db):
 
     @bot.message_handler(func=lambda m: m.text == "Usage")
     def usage(message: types.Message):
-        user = db.get_user(message.from_user.id)
+        db.ensure_user(message.from_user.id, message.from_user.username)
+        user = db.get_user(message.from_user.id) or {}
         voices = db.list_user_voices(message.from_user.id)
-        models = client.list_models()
+        models = get_active_models(db)
 
-        selected_id = user.get("selected_model")
+        selected_id = ((user.get("selected_model") or "").strip())
         selected_name = get_model_name(models, selected_id) if selected_id else "Not selected"
 
-        default_voice_id = db.get_setting("default_voice_id", DEFAULT_MODELS[0]["id"])
+        default_voice_id = resolve_default_voice(db, models)
         default_voice_name = get_model_name(models, default_voice_id)
+
+        if selected_id and selected_id not in {(m.get('id') or '').strip() for m in models}:
+            selected_name = f"Invalid old voice -> using default ({default_voice_name})"
 
         mode = (user.get("tts_speed") or "natural").strip().lower()
 
@@ -166,14 +243,21 @@ def register_user_handlers(bot: telebot.TeleBot, db):
 
     @bot.message_handler(func=lambda m: m.text == "Select Model")
     def select_model(message: types.Message):
-        models = client.list_models()
+        models = get_active_models(db)
         bot.send_message(message.chat.id, "Choose a model:", reply_markup=build_models_keyboard(models))
 
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("model:"))
     def model_chosen(callback: types.CallbackQuery):
-        voice_id = callback.data.split(":", 1)[1]
+        voice_id = callback.data.split(":", 1)[1].strip()
+        models = get_active_models(db)
+        valid_ids = {(m.get("id") or "").strip() for m in models}
+
+        if voice_id not in valid_ids:
+            bot.answer_callback_query(callback.id, "Invalid or removed voice", show_alert=True)
+            return
+
         db.update_user_fields(callback.from_user.id, {"selected_model": voice_id})
-        model_name = get_model_name(client.list_models(), voice_id)
+        model_name = get_model_name(models, voice_id)
         bot.send_message(callback.message.chat.id, f"✅ Model selected: <b>{model_name}</b>\nNow send text to generate voice.")
         bot.answer_callback_query(callback.id)
 
@@ -188,7 +272,8 @@ def register_user_handlers(bot: telebot.TeleBot, db):
             bot.send_message(message.chat.id, f"Text too long. Limit: {MAX_TTS_CHARS} characters.")
             return
 
-        user = db.get_user(message.from_user.id)
+        db.ensure_user(message.from_user.id, message.from_user.username)
+        user = db.get_user(message.from_user.id) or {}
         credits = user.get("credits") or 0
 
         if credits <= 0:
@@ -199,14 +284,11 @@ def register_user_handlers(bot: telebot.TeleBot, db):
             bot.send_message(message.chat.id, "❌ Your validity expired.")
             return
 
-        model = user.get("selected_model")
-
-        if not model:
-            model = db.get_setting("default_voice_id", DEFAULT_MODELS[0]["id"])
+        models = get_active_models(db)
+        model = resolve_user_voice(db, user, models)
 
         mode = (user.get("tts_speed") or "natural").strip().lower()
         spd = speed_to_value(mode)
-
         txt_natural = humanize_text(txt)
 
         try:
@@ -216,7 +298,7 @@ def register_user_handlers(bot: telebot.TeleBot, db):
                 language="en",
                 format_="opus",
                 speed=spd,
-                latency="slow",
+                latency="balanced",
             )
         except Exception as e:
             bot.send_message(message.chat.id, f"TTS error: {e}")
@@ -236,7 +318,7 @@ def register_user_handlers(bot: telebot.TeleBot, db):
         db.store_voice(message.from_user.id, ogg_path)
         db.remove_credits(message.from_user.id, COST_PER_VOICE)
 
-        model_name = get_model_name(client.list_models(), model)
+        model_name = get_model_name(models, model)
         bot.send_message(
             message.chat.id,
             f"🎙️ Voice generated! (Model: <b>{model_name}</b>, Speed: <b>{speed_to_label(mode)}</b>)\n"

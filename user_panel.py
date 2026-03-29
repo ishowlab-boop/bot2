@@ -10,7 +10,7 @@ from config import (
     VOICES_DIR,
     REQUIRE_VALIDITY_FOR_TTS,
     MAX_TTS_CHARS,
-    DEFAULT_MODELS,  # ✅ NEW
+    DEFAULT_MODELS,
 )
 from fish_audio import FishAudioClient
 
@@ -47,7 +47,7 @@ def get_model_name(models, voice_id: str) -> str:
 def humanize_text(s: str) -> str:
     s = (s or "").strip()
     s = re.sub(r"\s+", " ", s)
-    s = s.replace(", ", ", … ")
+    s = s.replace(", ", ", ... ")
     s = s.replace("!", "!\n").replace("?", "?\n").replace(".", ".\n")
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
@@ -78,7 +78,12 @@ def speed_to_value(mode: str) -> float:
 
 def speed_to_label(mode: str) -> str:
     mode = (mode or "natural").lower()
-    return {"fast": "Fast", "normal": "Normal", "natural": "Natural", "slow": "Slow"}.get(mode, "Natural")
+    return {
+        "fast": "Fast",
+        "normal": "Normal",
+        "natural": "Natural",
+        "slow": "Slow",
+    }.get(mode, "Natural")
 
 
 def register_user_handlers(bot: telebot.TeleBot, db):
@@ -87,7 +92,24 @@ def register_user_handlers(bot: telebot.TeleBot, db):
     @bot.message_handler(commands=["start"])
     def cmd_start(message: types.Message):
         db.ensure_user(message.from_user.id, message.from_user.username)
-        bot.send_message(message.chat.id, "Welcome! Use the buttons below.", reply_markup=build_user_keyboard())
+
+        user_id = message.from_user.id
+
+        welcome_text = (
+            "✨ <b>Welcome to our bot!</b> 🤖\n"
+            "We're glad to have you here 💙\n\n"
+            "📢 <b>Share this bot with your friends:</b>\n"
+            "🔗 <a href=\"https://t.me/ishowlab_bot\">t.me/ishowlab_bot</a>\n\n"
+            "🙏 <b>Thank you for joining us!</b>\n"
+            f"🆔 <b>Your ID:</b> <code>{user_id}</code>"
+        )
+
+        bot.send_message(
+            message.chat.id,
+            welcome_text,
+            reply_markup=build_user_keyboard(),
+            disable_web_page_preview=True,
+        )
 
     @bot.message_handler(func=lambda m: m.text == "Contact Admin")
     def contact_admin(message: types.Message):
@@ -100,6 +122,7 @@ def register_user_handlers(bot: telebot.TeleBot, db):
     @bot.message_handler(func=lambda m: m.text == "Plans")
     def plans(message: types.Message):
         from config import PLANS
+
         lines = ["Available plans:"]
         for p in PLANS:
             lines.append(f"• {p['name']}: {p['credits']} credits, {p['price']}, validity {p['validity_days']} days")
@@ -125,7 +148,6 @@ def register_user_handlers(bot: telebot.TeleBot, db):
         selected_id = user.get("selected_model")
         selected_name = get_model_name(models, selected_id) if selected_id else "Not selected"
 
-        # ✅ NEW: default voice id from admin panel (DB settings)
         default_voice_id = db.get_setting("default_voice_id", DEFAULT_MODELS[0]["id"])
         default_voice_name = get_model_name(models, default_voice_id)
 
@@ -179,7 +201,6 @@ def register_user_handlers(bot: telebot.TeleBot, db):
 
         model = user.get("selected_model")
 
-        # ✅ NEW: If user didn't select model, use admin-set default voice id
         if not model:
             model = db.get_setting("default_voice_id", DEFAULT_MODELS[0]["id"])
 
